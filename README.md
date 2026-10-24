@@ -18,6 +18,7 @@ Then open <http://127.0.0.1:8000/docs> for interactive Swagger docs.
 | Method | Path                | Description                              |
 | ------ | ------------------- | ---------------------------------------- |
 | GET    | `/health`           | Liveness check                           |
+| GET    | `/health/upstream`  | Diagnostic: is Open-Meteo reachable? (always 200) |
 | GET    | `/weather/current`  | Current conditions                       |
 | GET    | `/weather/forecast` | Daily forecast (1–16 days, default 7)    |
 
@@ -128,10 +129,38 @@ these files. Either move the project files to the repo root (they must not sit i
 `uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}`, so the app never depends on
 auto-detection. `python main.py` also starts the server as a fallback.
 
-**If the deployment crashes:** open the deployment's runtime logs in the Unkey dashboard.
-The first traceback or `Error:` line says why (a missing dependency, an import error, or a
-port mismatch). The app must listen on the `PORT` env var, and `/health` should return 200
-once it is up.
+**If you see `err:frontline:upstream:bad_gateway` (502):** an instance is running and accepted
+the connection, but the request then failed (connection reset, app crash, OOM kill, or a
+rollout replacing the instance). Check the runtime logs first, then:
+
+| Symptom | Cause / fix |
+| --- | --- |
+| Log shows `Killed` or the instance restarts | Out of memory: raise the app's memory in runtime settings |
+| Log shows a traceback | Fix the error it names (open an issue with the first lines) |
+| Log is silent when you send a request | The request never reaches the app: check the port setting matches `PORT` |
+| `/health` works, `/weather/*` doesn't | Call `/health/upstream`. It always returns 200 and says whether Open-Meteo is reachable from the host |
+| Fails only right after a deploy | Transient while the old instance is replaced: retry in a minute |
+
+Uvicorn runs with `--timeout-keep-alive 75` so idle keep-alive connections that the gateway
+reuses are not closed early (its 5s default can cause sporadic 502s).
+
+**If you see `err:frontline:capacity:no_running_instances` (503):** Unkey has no running,
+ready instance for the deployment. The container is crashing on start, never became ready, or
+listens on a different port than the app's configured port. Work through these in order:
+
+1. Open the deployment in the Unkey dashboard and read the **runtime logs**. The first
+   traceback or `Error:` line is the cause.
+2. Check **App settings > Runtime** and make sure the port matches the `PORT` the app is given
+   (8080 by default). The app always binds to `$PORT`.
+3. Prefer the Dockerfile build: set **App settings > Build > Dockerfile** to `Dockerfile`.
+   It is deterministic, unlike automatic detection.
+4. Reproduce locally. If this works, the image is fine and the problem is platform settings:
+
+   ```bash
+   docker build -t weather-api .
+   docker run --rm -e PORT=8080 -p 8080:8080 weather-api
+   curl localhost:8080/health      # {"status":"ok",...}
+   ```
 
 **From the CLI** (deploys a pre-built image, so build and push it to a registry first):
 
