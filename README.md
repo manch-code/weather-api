@@ -80,7 +80,7 @@ Set via environment variables (see `.env.example`):
 | Variable               | Default     | Description                                  |
 | ---------------------- | ----------- | -------------------------------------------- |
 | `HOST`                 | `127.0.0.1` | Bind address for `python -m weather_api`     |
-| `PORT`                 | `8000`      | Bind port                                    |
+| `PORT`                 | `8000` (`8080` in Docker) | Bind port; platforms like Unkey set this for you |
 | `WEATHER_HTTP_TIMEOUT` | `10`        | Upstream request timeout (seconds)           |
 | `WEATHER_CACHE_TTL`    | `300`       | In-memory cache TTL in seconds (0 disables)  |
 
@@ -97,12 +97,68 @@ CI runs both on Python 3.10–3.13 via GitHub Actions.
 
 ```bash
 docker build -t weather-api .
-docker run -p 8000:8000 weather-api
+docker run -p 8080:8080 weather-api
+# or choose your own port:
+docker run -e PORT=9000 -p 9000:9000 weather-api
 ```
+
+The container binds to `0.0.0.0` and reads the `PORT` environment variable (default `8080`).
+
+## Deploy on Unkey
+
+[Unkey Deploy](https://www.unkey.com/docs) builds the `Dockerfile` in this repo and runs it
+behind a gateway. The image already meets Unkey's runtime requirements:
+
+- listens on the `PORT` env var that Unkey injects (default 8080)
+- exits cleanly on `SIGTERM` (Python runs as PID 1 via exec-form `CMD`, uvicorn drains requests)
+- writes nothing to local disk, well under the 128 MiB limit
+
+**From GitHub (recommended):** connect this repo in the Unkey dashboard, and in
+**App settings > Build** set the Dockerfile path to `Dockerfile` with root directory `.`.
+Pushes to your default branch deploy to production; other branches get previews.
+
+**Automatic build (no Dockerfile):** Unkey and Railway build with Railpack, which detects this
+project as a FastAPI app from the root `main.py` and `requirements.txt`, then starts it with
+`uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}`. If the build fails with
+*"Railpack could not determine how to build the app"*, the build directory doesn't contain
+these files. Either move the project files to the repo root (they must not sit inside a
+`weather-api/` subfolder), or set the app's **Root directory** to that subfolder.
+
+**Start command:** `railpack.json` pins it to
+`uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}`, so the app never depends on
+auto-detection. `python main.py` also starts the server as a fallback.
+
+**If the deployment crashes:** open the deployment's runtime logs in the Unkey dashboard.
+The first traceback or `Error:` line says why (a missing dependency, an import error, or a
+port mismatch). The app must listen on the `PORT` env var, and `/health` should return 200
+once it is up.
+
+**From the CLI** (deploys a pre-built image, so build and push it to a registry first):
+
+```bash
+docker build -t ghcr.io/<you>/weather-api:v0.1.0 .
+docker push ghcr.io/<you>/weather-api:v0.1.0
+
+export UNKEY_ROOT_KEY=unkey_xxx
+export UNKEY_PROJECT=<project>
+export UNKEY_APP=<app>
+unkey deploy ghcr.io/<you>/weather-api:v0.1.0 --env=production
+```
+
+**Protecting the API:** no code changes are needed. Unkey can enforce API-key auth and rate
+limits in front of the app (attach a keyspace under the app's Sentinel settings), so requests
+without a valid key never reach this service. Use `/health` as the health-check path.
+
+Unkey Deploy is in public beta, so check the [Unkey docs](https://www.unkey.com/docs) if a
+setting name differs from the above.
 
 ## Project layout
 
+
 ```
+main.py       root entrypoint (`main:app`) for auto-detecting platforms
+railpack.json pins the start command for Railpack builds
+requirements.txt  runtime deps for platform builds
 src/weather_api/
   main.py     FastAPI app, routes, error handlers
   client.py   Open-Meteo client with a small TTL cache
@@ -111,3 +167,6 @@ src/weather_api/
 tests/        pytest suite
 ```
 
+## License
+
+MIT
